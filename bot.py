@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 import threading
 import asyncio
@@ -16,13 +17,27 @@ from telegram.ext import (
 from groq import Groq
 from googlesearch import search
 
+# 🔥 Firebase
+import firebase_admin
+from firebase_admin import credentials, firestore
+
 # =========================
 # 🔐 ENV
 # =========================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+FIREBASE_KEY = os.getenv("FIREBASE_KEY")
 
 client = Groq(api_key=GROQ_API_KEY)
+
+# =========================
+# 🔥 Firebase Init
+# =========================
+firebase_json = json.loads(FIREBASE_KEY)
+cred = credentials.Certificate(firebase_json)
+firebase_admin.initialize_app(cred)
+
+db = firestore.client()
 
 # =========================
 # 🧠 DATA
@@ -31,30 +46,14 @@ user_data = {}
 user_study = {}
 
 # =========================
-# 🎓 STUDY DATA
+# 📥 GET DATA FROM FIREBASE
 # =========================
-study_data = {
-    "💻 IT": {
-        "Computer Science": {
-            "Programming": {
-                "pdf": ["https://example.com/programming.pdf"],
-                "videos": ["https://youtube.com/..."]
-            },
-            "Database": {
-                "pdf": ["https://example.com/db.pdf"],
-                "videos": ["https://youtube.com/..."]
-            }
-        }
-    },
-    "🏗️ Engineering": {
-        "Civil": {
-            "Statics": {
-                "pdf": ["https://example.com/statics.pdf"],
-                "videos": ["https://youtube.com/..."]
-            }
-        }
-    }
-}
+def get_study_data():
+    docs = db.collection("study").stream()
+    data = {}
+    for doc in docs:
+        data[doc.id] = doc.to_dict()
+    return data
 
 # =========================
 # 🎛️ MENU
@@ -120,8 +119,9 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def handle_study(update, user_id, text):
     data = user_study[user_id]
+    study_data = get_study_data()
 
-    # اختيار القسم
+    # القسم
     if text in study_data:
         data["department"] = text
         specs = study_data[text].keys()
@@ -133,7 +133,7 @@ async def handle_study(update, user_id, text):
         )
         return
 
-    # اختيار التخصص
+    # التخصص
     if "department" in data and text in study_data[data["department"]]:
         data["specialization"] = text
         subjects = study_data[data["department"]][text].keys()
@@ -145,17 +145,17 @@ async def handle_study(update, user_id, text):
         )
         return
 
-    # اختيار المادة
+    # المادة
     if "specialization" in data:
         try:
             content = study_data[data["department"]][data["specialization"]][text]
 
             msg = "📚 المصادر:\n\n"
 
-            for pdf in content["pdf"]:
+            for pdf in content.get("pdf", []):
                 msg += f"📄 PDF: {pdf}\n"
 
-            for vid in content["videos"]:
+            for vid in content.get("videos", []):
                 msg += f"🎥 فيديو: {vid}\n"
 
             await update.message.reply_text(msg, reply_markup=main_menu())
@@ -176,7 +176,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = user_data[user_id]["mode"]
 
-    # الأزرار الرئيسية
     if text == "🤖 AI Chat":
         user_data[user_id]["mode"] = "ai"
         await update.message.reply_text("🤖 اكتب الآن")
@@ -184,6 +183,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "🎓 Study":
         user_data[user_id]["mode"] = "study"
+        study_data = get_study_data()
+
         keyboard = [[d] for d in study_data.keys()]
         await update.message.reply_text(
             "🏫 اختر القسم:",
@@ -207,7 +208,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔙 رجعنا للقائمة", reply_markup=main_menu())
         return
 
-    # تنفيذ حسب الوضع
+    # التنفيذ
     if mode == "ai":
         reply = await ai_chat(user_id, text)
         await update.message.reply_text(reply)
@@ -247,7 +248,7 @@ app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-print("🔥 BOT FINAL VERSION STARTED")
+print("🔥 FIREBASE BOT STARTED")
 
 requests.get(
     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true",
