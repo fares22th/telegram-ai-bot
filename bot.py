@@ -1,12 +1,18 @@
 import os
 import requests
-import yt_dlp
 import threading
 import asyncio
+import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
 
 from groq import Groq
 from googlesearch import search
@@ -26,50 +32,76 @@ if not GROQ_API_KEY:
 client = Groq(api_key=GROQ_API_KEY)
 
 # =========================
+# 💾 DATABASE
+# =========================
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    messages_count INTEGER DEFAULT 0
+)
+""")
+conn.commit()
+
+def save_user(user):
+    cursor.execute("""
+    INSERT OR IGNORE INTO users (user_id, username, messages_count)
+    VALUES (?, ?, 0)
+    """, (user.id, user.username))
+
+    cursor.execute("""
+    UPDATE users SET messages_count = messages_count + 1
+    WHERE user_id = ?
+    """, (user.id,))
+
+    conn.commit()
+
+# =========================
 # START
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(" البوت يعمل 100%")
-    print("VERSION 2")
+    save_user(update.message.from_user)
+    await update.message.reply_text("🤖 أهلاً! اكتب أي شيء وسأرد عليك 🔥")
 
 # =========================
-# AI (FIXED 100%)
+# 🤖 AI CHAT (بدون أوامر)
 # =========================
-async def ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("/ai سؤالك")
-        return
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    text = update.message.text
 
-    question = " ".join(context.args)
+    save_user(user)
 
     try:
         loop = asyncio.get_running_loop()
 
-        chat = await loop.run_in_executor(
+        response = await loop.run_in_executor(
             None,
             lambda: client.chat.completions.create(
-                messages=[{"role": "user", "content": question}],
+                messages=[{"role": "user", "content": text}],
                 model="llama-3.3-70b-versatile"
             )
         )
 
-        await update.message.reply_text(chat.choices[0].message.content)
+        await update.message.reply_text("🤖 " + response.choices[0].message.content)
 
     except Exception as e:
         await update.message.reply_text(f"❌ خطأ: {e}")
 
 # =========================
-# SEARCH
+# 🔎 SEARCH
 # =========================
 async def smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("/search python")
+        await update.message.reply_text("🔎 /search python")
         return
 
     try:
         results = list(search(" ".join(context.args), num_results=5))
-
-        buttons = [[InlineKeyboardButton("فتح 🔗", url=url)] for url in results]
+        buttons = [[InlineKeyboardButton("🔗 فتح الرابط", url=url)] for url in results]
 
         await update.message.reply_text(
             "🔎 النتائج:",
@@ -80,7 +112,21 @@ async def smart_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ خطأ: {e}")
 
 # =========================
-# WEB SERVER
+# 📊 STATS
+# =========================
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("SELECT COUNT(*) FROM users")
+    users_count = cursor.fetchone()[0]
+
+    cursor.execute("SELECT SUM(messages_count) FROM users")
+    total_messages = cursor.fetchone()[0] or 0
+
+    await update.message.reply_text(
+        f"📊 الإحصائيات:\n👤 المستخدمين: {users_count}\n💬 الرسائل: {total_messages}"
+    )
+
+# =========================
+# 🌐 WEB SERVER
 # =========================
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -96,20 +142,24 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # =========================
-# APP
+# 🚀 APP
 # =========================
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("ai", ai))
 app.add_handler(CommandHandler("search", smart_search))
+app.add_handler(CommandHandler("stats", stats))
+
+# 🔥 أهم سطر (AI بدون أوامر)
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
 print("🔥 BOT STARTED")
 
-# 🔥 مهم جدًا (تنظيف نهائي)
+# 🔥 تنظيف التعارض
 requests.get(
     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true",
     timeout=10
 )
+print("NEW VERSION 999")
 
 app.run_polling(drop_pending_updates=True)
