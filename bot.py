@@ -30,6 +30,7 @@ client = Groq(api_key=GROQ_API_KEY)
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(" البوت يعمل 100%")
+    print("VERSION 2")
 
 # =========================
 # AI (FIXED 100%)
