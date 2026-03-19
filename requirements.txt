@@ -1,6 +1,5 @@
 python-telegram-bot==20.3
 requests
-yt-dlp
 groq
 googlesearch-python
-PyPDF2
+firebase-admin
