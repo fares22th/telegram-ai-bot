@@ -1,25 +1,25 @@
 import os
 import json
-import requests
 import threading
 import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import requests
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     ContextTypes,
     MessageHandler,
-    filters
+    filters,
 )
-
 from groq import Groq
-from googlesearch import search
 
 # 🔥 Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
+from google.cloud.firestore import FieldValue
+
 
 # =========================
 # 🔐 ENV
@@ -28,64 +28,124 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 FIREBASE_KEY = os.getenv("FIREBASE_KEY")
 
+if not TELEGRAM_TOKEN:
+    raise SystemExit("❌ TELEGRAM_TOKEN missing")
+
+if not GROQ_API_KEY:
+    raise SystemExit("❌ GROQ_API_KEY missing")
+
+if not FIREBASE_KEY:
+    raise SystemExit("❌ FIREBASE_KEY missing")
+
 client = Groq(api_key=GROQ_API_KEY)
+
 
 # =========================
 # 🔥 Firebase Init
 # =========================
-firebase_json = json.loads(FIREBASE_KEY)
-cred = credentials.Certificate(firebase_json)
-firebase_admin.initialize_app(cred)
+try:
+    cred = credentials.Certificate(json.loads(FIREBASE_KEY))
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("🔥 Firebase CONNECTED")
+except Exception as e:
+    print("❌ Firebase ERROR:", e)
+    db = None
 
-db = firestore.client()
 
 # =========================
-# 🧠 DATA
+# ⚡ CACHE
+# =========================
+STUDY_CACHE = {}
+
+def get_study_data():
+    global STUDY_CACHE
+
+    if not STUDY_CACHE:
+        docs = db.collection("study").stream()
+        for doc in docs:
+            STUDY_CACHE[doc.id] = doc.to_dict()
+
+    return STUDY_CACHE
+
+
+# =========================
+# 🔥 FIREBASE HELPERS
+# =========================
+def save_user(user_id):
+    try:
+        db.collection("users").document(str(user_id)).set({
+            "id": str(user_id)
+        }, merge=True)
+        print("✅ user saved:", user_id)
+    except Exception as e:
+        print("❌ save user error:", e)
+
+
+def increment_messages():
+    try:
+        db.collection("stats").document("messages").set(
+            {"count": FieldValue.increment(1)},
+            merge=True,
+        )
+    except Exception as e:
+        print("❌ msg error:", e)
+
+
+def increment_subject(subject):
+    try:
+        db.collection("usage").document(subject).set(
+            {"count": FieldValue.increment(1)},
+            merge=True,
+        )
+    except Exception as e:
+        print("❌ usage error:", e)
+
+
+# =========================
+# 🧠 MEMORY
 # =========================
 user_data = {}
 user_study = {}
 
-# =========================
-# 📥 GET DATA FROM FIREBASE
-# =========================
-def get_study_data():
-    docs = db.collection("study").stream()
-    data = {}
-    for doc in docs:
-        data[doc.id] = doc.to_dict()
-    return data
 
 # =========================
 # 🎛️ MENU
 # =========================
 def main_menu():
-    keyboard = [
-        ["🤖 AI Chat", "🎓 Study"],
-        ["🔎 Search", "📊 Stats"],
-        ["🔙 Reset"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        [
+            ["🤖 AI Chat", "🎓 Study"],
+            ["🧠 AI Search", "📊 Stats"],
+            ["🔙 Reset"],
+        ],
+        resize_keyboard=True,
+    )
+
 
 # =========================
-# START
+# 🚀 START
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    uid = update.effective_user.id
 
-    user_data[user_id] = {"history": [], "mode": "menu"}
-    user_study[user_id] = {}
+    user_data[uid] = {"history": [], "mode": "menu"}
+    user_study[uid] = {}
+
+    save_user(uid)
+    increment_messages()
 
     await update.message.reply_text(
-        "🤖 اختر ماذا تريد:",
+        "🔥 أهلاً! اختر:",
         reply_markup=main_menu()
     )
+
 
 # =========================
 # 🤖 AI CHAT
 # =========================
 async def ai_chat(user_id, text):
     history = user_data[user_id]["history"]
-
     history.append({"role": "user", "content": text})
 
     loop = asyncio.get_running_loop()
@@ -94,8 +154,8 @@ async def ai_chat(user_id, text):
         None,
         lambda: client.chat.completions.create(
             messages=history[-10:],
-            model="llama-3.3-70b-versatile"
-        )
+            model="llama-3.3-70b-versatile",
+        ),
     )
 
     reply = response.choices[0].message.content
@@ -103,157 +163,186 @@ async def ai_chat(user_id, text):
 
     return "🤖 " + reply
 
+
+# =========================
+# 🧠 AI SEARCH (🔥 الجديد)
+# =========================
+async def ai_search(query):
+    loop = asyncio.get_running_loop()
+
+    response = await loop.run_in_executor(
+        None,
+        lambda: client.chat.completions.create(
+            messages=[{
+                "role": "user",
+                "content": f"ابحث عن هذا الموضوع واعطني أفضل شرح وروابط مفيدة:\n{query}"
+            }],
+            model="llama-3.3-70b-versatile",
+        ),
+    )
+
+    return "🧠 AI Search:\n\n" + response.choices[0].message.content
+
+
 # =========================
 # 📊 STATS
 # =========================
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users_count = len(user_data)
-    total_messages = sum(len(u["history"]) for u in user_data.values())
+    users = list(db.collection("users").stream())
+    users_count = len(users)
+
+    msg_doc = db.collection("stats").document("messages").get()
+    msg_count = msg_doc.to_dict().get("count", 0) if msg_doc.exists else 0
 
     await update.message.reply_text(
-        f"📊 الإحصائيات:\n👤 المستخدمين: {users_count}\n💬 الرسائل: {total_messages}"
+        f"📊 الإحصائيات:\n👤 المستخدمين: {users_count}\n💬 الرسائل: {msg_count}"
     )
 
+
 # =========================
-# 🎓 STUDY FLOW
+# 🎓 STUDY
 # =========================
-async def handle_study(update, user_id, text):
-    data = user_study[user_id]
+async def handle_study(update, uid, text):
+    data = user_study[uid]
     study_data = get_study_data()
 
-    # القسم
     if text in study_data:
         data["department"] = text
-        specs = study_data[text].keys()
 
-        keyboard = [[s] for s in specs] + [["🔙 رجوع"]]
+        keyboard = [[s] for s in study_data[text].keys()]
+        keyboard.append(["🔙 رجوع"])
+
         await update.message.reply_text(
             "🎓 اختر التخصص:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
         )
         return
 
-    # التخصص
     if "department" in data and text in study_data[data["department"]]:
         data["specialization"] = text
+
         subjects = study_data[data["department"]][text].keys()
 
-        keyboard = [[s] for s in subjects] + [["🔙 رجوع"]]
+        keyboard = [[s] for s in subjects]
+        keyboard.append(["🔙 رجوع"])
+
         await update.message.reply_text(
             "📘 اختر المادة:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
         )
         return
 
-    # المادة
     if "specialization" in data:
         try:
             content = study_data[data["department"]][data["specialization"]][text]
 
+            increment_subject(text)
+
             msg = "📚 المصادر:\n\n"
 
             for pdf in content.get("pdf", []):
-                msg += f"📄 PDF: {pdf}\n"
+                msg += f"📄 {pdf}\n"
 
             for vid in content.get("videos", []):
-                msg += f"🎥 فيديو: {vid}\n"
+                msg += f"🎥 {vid}\n"
 
             await update.message.reply_text(msg, reply_markup=main_menu())
 
         except:
             await update.message.reply_text("❌ لا يوجد محتوى")
 
+
 # =========================
-# 🎯 MAIN HANDLER
+# 🎯 MAIN
 # =========================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    uid = update.effective_user.id
     text = update.message.text
 
-    if user_id not in user_data:
-        user_data[user_id] = {"history": [], "mode": "menu"}
-        user_study[user_id] = {}
+    save_user(uid)
+    increment_messages()
 
-    mode = user_data[user_id]["mode"]
+    if uid not in user_data:
+        user_data[uid] = {"history": [], "mode": "menu"}
+        user_study[uid] = {}
+
+    mode = user_data[uid]["mode"]
 
     if text == "🤖 AI Chat":
-        user_data[user_id]["mode"] = "ai"
-        await update.message.reply_text("🤖 اكتب الآن")
+        user_data[uid]["mode"] = "ai"
+        await update.message.reply_text("🤖 اكتب سؤالك")
         return
 
     elif text == "🎓 Study":
-        user_data[user_id]["mode"] = "study"
-        study_data = get_study_data()
+        user_data[uid]["mode"] = "study"
 
+        study_data = get_study_data()
         keyboard = [[d] for d in study_data.keys()]
+
         await update.message.reply_text(
             "🏫 اختر القسم:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True),
         )
         return
 
-    elif text == "🔎 Search":
-        user_data[user_id]["mode"] = "search"
-        await update.message.reply_text("🔎 اكتب كلمة البحث")
+    elif text == "🧠 AI Search":
+        user_data[uid]["mode"] = "search"
+        await update.message.reply_text("🧠 اكتب ما تريد البحث عنه")
         return
 
     elif text == "📊 Stats":
         await stats(update, context)
         return
 
-    elif text == "🔙 Reset" or text == "🔙 رجوع":
-        user_data[user_id]["mode"] = "menu"
-        user_data[user_id]["history"] = []
-        user_study[user_id] = {}
-        await update.message.reply_text("🔙 رجعنا للقائمة", reply_markup=main_menu())
+    elif text in ["🔙 Reset", "🔙 رجوع"]:
+        user_data[uid] = {"history": [], "mode": "menu"}
+        user_study[uid] = {}
+        await update.message.reply_text("🔙 رجعنا", reply_markup=main_menu())
         return
 
-    # التنفيذ
     if mode == "ai":
-        reply = await ai_chat(user_id, text)
+        reply = await ai_chat(uid, text)
         await update.message.reply_text(reply)
 
     elif mode == "search":
-        results = list(search(text, num_results=3))
-        msg = "🔎 النتائج:\n" + "\n".join(results)
-        await update.message.reply_text(msg)
+        result = await ai_search(text)
+        await update.message.reply_text(result)
 
     elif mode == "study":
-        await handle_study(update, user_id, text)
+        await handle_study(update, uid, text)
 
     else:
         await update.message.reply_text("⬇️ اختر من القائمة", reply_markup=main_menu())
 
+
 # =========================
-# 🌐 WEB SERVER
+# 🌐 SERVER
 # =========================
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running")
+        self.wfile.write(b"Bot running")
 
 def run_web():
-    PORT = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
-    server.serve_forever()
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 threading.Thread(target=run_web, daemon=True).start()
 
+
 # =========================
-# 🚀 APP
+# 🚀 RUN
 # =========================
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-print("🔥 FIREBASE BOT STARTED")
-print(GROQ_API_KEY)
+print("🔥 BOT STARTED")
 
 requests.get(
-    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true",
-    timeout=10
+    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook?drop_pending_updates=true"
 )
 
 app.run_polling(drop_pending_updates=True)
