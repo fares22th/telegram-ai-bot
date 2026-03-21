@@ -18,7 +18,7 @@ from groq import Groq
 # 🔥 Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore import FieldValue
+from google.cloud.firestore import Increment   # ✅ الصحيح
 
 
 # =========================
@@ -85,7 +85,7 @@ def save_user(user_id):
 def increment_messages():
     try:
         db.collection("stats").document("messages").set(
-            {"count": FieldValue.increment(1)},
+            {"count": Increment(1)},   # ✅
             merge=True,
         )
     except Exception as e:
@@ -94,8 +94,10 @@ def increment_messages():
 
 def increment_subject(subject):
     try:
-        db.collection("usage").document(subject).set(
-            {"count": FieldValue.increment(1)},
+        key = str(subject).replace("/", "_")
+
+        db.collection("usage").document(key).set(
+            {"count": Increment(1)},   # ✅
             merge=True,
         )
     except Exception as e:
@@ -165,7 +167,7 @@ async def ai_chat(user_id, text):
 
 
 # =========================
-# 🧠 AI SEARCH (🔥 الجديد)
+# 🧠 AI SEARCH
 # =========================
 async def ai_search(query):
     loop = asyncio.get_running_loop()
@@ -175,7 +177,7 @@ async def ai_search(query):
         lambda: client.chat.completions.create(
             messages=[{
                 "role": "user",
-                "content": f"ابحث عن هذا الموضوع واعطني أفضل شرح وروابط مفيدة:\n{query}"
+                "content": f"ابحث واشرح هذا الموضوع بشكل مفيد مع أمثلة:\n{query}"
             }],
             model="llama-3.3-70b-versatile",
         ),
@@ -188,15 +190,18 @@ async def ai_search(query):
 # 📊 STATS
 # =========================
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    users = list(db.collection("users").stream())
-    users_count = len(users)
+    try:
+        users = list(db.collection("users").stream())
+        users_count = len(users)
 
-    msg_doc = db.collection("stats").document("messages").get()
-    msg_count = msg_doc.to_dict().get("count", 0) if msg_doc.exists else 0
+        msg_doc = db.collection("stats").document("messages").get()
+        msg_count = msg_doc.to_dict().get("count", 0) if msg_doc.exists else 0
 
-    await update.message.reply_text(
-        f"📊 الإحصائيات:\n👤 المستخدمين: {users_count}\n💬 الرسائل: {msg_count}"
-    )
+        await update.message.reply_text(
+            f"📊 الإحصائيات:\n👤 المستخدمين: {users_count}\n💬 الرسائل: {msg_count}"
+        )
+    except Exception as e:
+        print("❌ stats error:", e)
 
 
 # =========================
